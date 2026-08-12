@@ -1,0 +1,12 @@
+# Automacao do navegador (usa o Edge/Chrome ja instalado na maquina).
+playwright>=1.45,<2
+
+# Agendamento no proprio thread do loop principal (obrigatorio para a API
+# sincrona do Playwright, que nao aceita chamadas de outra thread).
+schedule>=1.2,<2
+
+# Notificacoes nativas do Windows 10/11 (com som padrao).
+windows-toasts>=1.1.0; sys_platform == "win32"
+
+# Fallback de notificacao, caso o windows-toasts nao funcione nesta maquina.
+plyer>=2.1

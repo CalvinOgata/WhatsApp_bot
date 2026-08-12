@@ -1,0 +1,13 @@
+# Ambiente virtual criado pelo setup.bat
+.venv/
+
+# Dados de sessao do WhatsApp. No Windows ficam em %LOCALAPPDATA%, mas fora dele
+# o app grava aqui. Contem a sessao autenticada da conta: nunca versionar.
+user_data/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Especificacao/instrucoes do projeto (uso local)
+CLAUDE.md

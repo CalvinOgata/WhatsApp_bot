@@ -1,0 +1,11 @@
+{
+  "user_name": "SEU NOME AQUI",
+  "morning_time": "08:30",
+  "evening_time": "21:30",
+  "target_chats": [
+    "NOME EXATO DA PRIMEIRA CONVERSA",
+    "NOME EXATO DA SEGUNDA CONVERSA"
+  ],
+  "check_interval_seconds": 12,
+  "browser_channel": "msedge"
+}
