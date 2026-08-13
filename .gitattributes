@@ -1,0 +1,11 @@
+# Arquivos .bat precisam de CRLF: com LF sozinho o cmd.exe pode errar labels
+# (`call :nome`) e blocos de `for`, que o stop.bat usa.
+*.bat text eol=crlf
+
+# O resto fica com LF.
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.html text eol=lf
+*.ini text eol=lf

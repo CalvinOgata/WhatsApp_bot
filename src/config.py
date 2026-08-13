@@ -156,6 +156,11 @@ class Config:
         return self.data_dir / "assistente.lock"
 
     @property
+    def stop_request_path(self) -> Path:
+        """Arquivo que o stop.bat cria para pedir um encerramento limpo."""
+        return self.data_dir / "stop.request"
+
+    @property
     def all_chats(self) -> tuple[str, ...]:
         """Toda conversa citada em qualquer lugar da configuracao."""
         seen: list[str] = list(self.target_chats)

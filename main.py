@@ -39,6 +39,7 @@ RESTART_BACKOFF = (15, 30, 60, 120, 300)
 BETWEEN_CHATS_SECONDS = (8.0, 25.0)
 
 _stop_requested = False
+_stop_file: Path | None = None
 
 
 # --------------------------------------------------------------------- infra
@@ -46,6 +47,41 @@ def _request_stop(signum: int, _frame: FrameType | None) -> None:
     global _stop_requested
     LOG.info("Sinal %s recebido: encerrando.", signum)
     _stop_requested = True
+
+
+def arm_stop_file(path: Path) -> None:
+    """Passa a observar o arquivo de parada que o stop.bat cria.
+
+    Encerrar por arquivo (e nao por taskkill) e' o que garante uma saida limpa: o
+    navegador e' fechado pelo Playwright, a sessao do WhatsApp fica intacta e a
+    trava de instancia e' liberada. Um taskkill no pythonw.exe deixaria o Chrome
+    orfao segurando o perfil, e o proximo start nao conseguiria usa-lo.
+    """
+    global _stop_file
+    _stop_file = path
+    # Um pedido esquecido de ontem nao pode derrubar a execucao de agora.
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        LOG.warning("Nao consegui apagar o pedido de parada antigo.", exc_info=True)
+
+
+def should_stop() -> bool:
+    """True se pediram para encerrar: sinal do sistema ou stop.bat."""
+    global _stop_requested
+    if _stop_requested:
+        return True
+    if _stop_file is not None and _stop_file.exists():
+        LOG.info("Pedido de encerramento recebido (%s).", _stop_file.name)
+        _stop_requested = True
+        try:
+            _stop_file.unlink()
+        except OSError:
+            LOG.debug("Nao consegui remover o pedido de parada.", exc_info=True)
+        return True
+    return False
 
 
 def install_signal_handlers() -> None:
@@ -169,7 +205,7 @@ class SingleInstanceLock:
 def interruptible_sleep(seconds: float) -> None:
     """Dorme em fatias para reagir rapido a um pedido de encerramento."""
     deadline = time.monotonic() + seconds
-    while not _stop_requested and time.monotonic() < deadline:
+    while not should_stop() and time.monotonic() < deadline:
         time.sleep(min(0.5, deadline - time.monotonic()))
 
 
@@ -180,7 +216,7 @@ def make_send_callback(driver: WhatsAppDriver, notifier: Notifier, config: Confi
     def send(message: ScheduledMessage) -> int:
         enviados = 0
         for index, chat in enumerate(message.chats):
-            if _stop_requested:
+            if should_stop():
                 LOG.warning("Encerrando no meio da mensagem '%s'.", message.name)
                 break
             if index:
@@ -207,7 +243,7 @@ def main_loop(
         ", ".join(config.mention_names),
         config.check_interval_seconds,
     )
-    while not _stop_requested:
+    while not should_stop():
         scheduler.tick()
         try:
             mentions = driver.find_mentions(config.mention_names)
@@ -298,7 +334,7 @@ def run(config: Config, notifier: Notifier, args: argparse.Namespace) -> int:
 
     attempt = 0
     try:
-        while not _stop_requested:
+        while not should_stop():
             try:
                 driver.start()
                 attempt = 0
@@ -394,6 +430,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.visible or args.diagnose:
         config.hide_window = False
+
+    arm_stop_file(config.stop_request_path)
 
     lock = SingleInstanceLock(config.lock_path)
     if not lock.acquire():

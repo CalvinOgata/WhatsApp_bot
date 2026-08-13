@@ -142,15 +142,31 @@ Para o assistente iniciar junto com o Windows:
 
 ## 🛑 Como desligar o programa
 
-A janela do navegador fica **minimizada** na barra de tarefas — pode clicar nela
-para ver o WhatsApp e minimizar de novo, sem problema. Mas fechar essa janela
-**não** desliga o programa: ele entende que o navegador caiu e abre outro.
+👉 Clique duas vezes em **`stop.bat`**. Pronto.
 
-Para desligar de verdade:
+Ele avisa o assistente, espera ele fechar o navegador direitinho e mostra
+"O assistente foi desligado". Se estiver enviando uma mensagem naquele exato
+momento, ele espera terminar — pode levar até um minuto, e a janela mostra
+pontinhos enquanto aguarda.
+
+Para ligar de novo, `start.bat` como sempre.
+
+> 💡 A janela do navegador fica **minimizada** na barra de tarefas — pode clicar
+> nela para ver o WhatsApp e minimizar de novo, sem problema. Mas **fechar essa
+> janela não desliga o programa**: ele entende que o navegador caiu e abre outro.
+> Quem desliga é o `stop.bat`.
+
+<details>
+<summary>Se o <code>stop.bat</code> não resolver</summary>
 
 1. ⌨️ Aperte `Ctrl + Shift + Esc` (Gerenciador de Tarefas).
 2. 🔍 Procure **`pythonw.exe`** na lista.
 3. ❌ Clique nele e depois em *Finalizar tarefa*.
+
+O `stop.bat` já faz isso sozinho como último recurso, depois de um minuto sem
+resposta.
+
+</details>
 
 ---
 
@@ -237,6 +253,7 @@ frequência.
 ├── requirements-dev.txt Dependências só dos testes
 ├── setup.bat            Cria .venv, instala tudo (espaço de usuário)
 ├── start.bat            Roda com pythonw.exe (sem console)
+├── stop.bat             Encerra pelo pedido de parada (sem taskkill)
 ├── main.py              Loop principal, logging, trava de instância única
 ├── src/
 │   ├── config.py            Leitura + validação do config.json
@@ -248,6 +265,7 @@ frequência.
     ├── test_config.py       Validação do config.json
     ├── test_scheduler.py    Horários, jitter, dias, não-duplicar
     ├── test_mentions.py     Detecção de @menções
+    ├── test_main.py         Parada limpa, trava, argumentos
     ├── test_driver_hidden.py Modo oculto: janela minimizada
     └── test_driver_dom.py   Playwright real contra a página falsa
 ```
@@ -256,7 +274,7 @@ frequência.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                  # tudo (125 testes)
+pytest                  # tudo (145 testes)
 pytest -m "not dom"     # só a lógica, sem navegador (rápido)
 ```
 
@@ -375,6 +393,7 @@ browser_profile\    sessão do WhatsApp (cookies, localStorage)
 assistente.log      log rotativo, 4 arquivos de 1 MB
 state.json          data do último envio de cada saudação
 assistente.lock     trava de instância única
+stop.request        pedido de parada criado pelo stop.bat (some sozinho)
 ```
 
 🔑 `browser_profile` contém a sessão autenticada da sua conta — trate como senha
