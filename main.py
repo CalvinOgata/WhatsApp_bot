@@ -245,6 +245,10 @@ def print_diagnosis(driver: WhatsAppDriver, scheduler: MessageScheduler, config:
 
     janela = report["window"]
     _emit(
+        f"Estado     : janela {report['window_state']} "
+        f"(minimized = rodando escondida, normal = visivel)"
+    )
+    _emit(
         f"Janela     : {janela['outer'][0]}x{janela['outer'][1]} | "
         f"pagina {janela['inner'][0]}x{janela['inner'][1]} | "
         f"tela util {janela['avail'][0]}x{janela['avail'][1]} | zoom {janela['dpr']}"

@@ -344,18 +344,17 @@ class WhatsAppDriver:
             width = max(width, min(MIN_WINDOW[0], avail[0]))
             height = max(height, min(MIN_WINDOW[1], avail[1]))
 
-            if hidden:
-                left, top = OFFSCREEN_POSITION
-            else:
-                left = max(0, (avail[0] - width) // 2)
-                top = max(0, (avail[1] - height) // 2)
+            left = max(0, (avail[0] - width) // 2)
+            top = max(0, (avail[1] - height) // 2)
 
-            cdp = self._context.new_cdp_session(page)
-            target = cdp.send("Browser.getWindowForTarget")
+            cdp, window_id = self._window_cdp()
+            # Primeiro a geometria "normal": e' ela que o Windows usa quando a
+            # usuaria restaura a janela. Nunca deixamos essa geometria fora da
+            # tela, senao restaurar/maximizar nao mostra nada.
             cdp.send(
                 "Browser.setWindowBounds",
                 {
-                    "windowId": target["windowId"],
+                    "windowId": window_id,
                     "bounds": {
                         "left": left,
                         "top": top,
@@ -365,8 +364,14 @@ class WhatsAppDriver:
                     },
                 },
             )
+            if hidden:
+                # Minimizar de verdade, em vez de teleportar a janela para fora
+                # da tela: assim ela aparece na barra de tarefas e restaurar,
+                # maximizar e fechar funcionam como em qualquer janela do Windows.
+                self.set_window_state("minimized")
             LOG.info(
-                "Janela em %sx%s na posicao (%s,%s); area util da tela: %sx%s.",
+                "Janela %s em %sx%s na posicao (%s,%s); area util da tela: %sx%s.",
+                "minimizada" if hidden else "visivel",
                 width,
                 height,
                 left,
@@ -405,12 +410,46 @@ class WhatsAppDriver:
         self._playwright = None
         self.page = None
 
+    # ------------------------------------------------------------------ janela
+    def _window_cdp(self) -> tuple:
+        """Sessao CDP e o id da janela do navegador."""
+        page = self._live_page
+        if self._context is None:
+            raise DriverError("Contexto do navegador indisponivel.")
+        cdp = self._context.new_cdp_session(page)
+        return cdp, cdp.send("Browser.getWindowForTarget")["windowId"]
+
+    def window_state(self) -> str:
+        """"normal", "minimized", "maximized", "fullscreen" - ou "unknown"."""
+        try:
+            cdp, window_id = self._window_cdp()
+            bounds = cdp.send("Browser.getWindowBounds", {"windowId": window_id})["bounds"]
+            return str(bounds.get("windowState", "unknown"))
+        except Exception:
+            LOG.debug("Nao consegui ler o estado da janela.", exc_info=True)
+            return "unknown"
+
+    def set_window_state(self, state: str) -> None:
+        try:
+            cdp, window_id = self._window_cdp()
+            cdp.send(
+                "Browser.setWindowBounds",
+                {"windowId": window_id, "bounds": {"windowState": state}},
+            )
+        except Exception:
+            LOG.debug("Nao consegui mudar a janela para '%s'.", state, exc_info=True)
+
     def bring_to_front(self) -> None:
-        """Traz a janela para a frente (usado no login por QR code)."""
+        """Mostra a janela: desminimiza e foca (usado no login por QR code).
+
+        `page.bring_to_front()` sozinho troca de aba, mas nao desminimiza a janela
+        do sistema - e o QR code precisa estar visivel de verdade.
+        """
         try:
             self._live_page.bring_to_front()
         except Exception:
-            LOG.debug("Nao foi possivel focar a janela.", exc_info=True)
+            LOG.debug("Nao foi possivel focar a aba.", exc_info=True)
+        self.set_window_state("normal")
 
     # ------------------------------------------------------------------ estado
     def _match_selector(
@@ -579,16 +618,55 @@ class WhatsAppDriver:
         self._clear_search_text()
         return box
 
+    def _compose(self, chat_name: str, text: str) -> bool:
+        """Abre a conversa e digita o texto, conferindo que ele chegou na caixa.
+
+        A conferencia acontece ANTES do Enter, entao um "nao chegou" e' sempre
+        seguro de repetir: nada foi enviado ainda.
+        """
+        box = self.open_chat(chat_name)
+        if box is None:
+            return False
+        self.type_human_like(box, text)
+        try:
+            digitado = box.inner_text() or ""
+        except PlaywrightError:
+            LOG.warning("Nao consegui ler a caixa de mensagem.", exc_info=True)
+            return False
+        if _normalize(digitado) != _normalize(text):
+            LOG.warning(
+                "A caixa de mensagem nao recebeu o texto (esperava %r, veio %r).",
+                text,
+                digitado.strip()[:80],
+            )
+            return False
+        return True
+
     def send_message(self, chat_name: str, text: str) -> bool:
         """Procura a conversa, abre, digita e envia. Retorna True se enviou."""
         page = self._live_page
 
         LOG.info("Preparando envio para '%s'.", chat_name)
-        box = self.open_chat(chat_name)
-        if box is None:
-            return False
+        minimizada = self.window_state() == "minimized"
 
-        self.type_human_like(box, text)
+        if not self._compose(chat_name, text):
+            # Uma janela minimizada pode nao processar a digitacao em algumas
+            # versoes do Windows. Como nada foi enviado, mostrar a janela e tentar
+            # outra vez e' seguro - e melhor uma janela aparecendo do que um
+            # "Bom dia!" que nunca sai.
+            if not minimizada:
+                LOG.error("Nao consegui preencher a mensagem para '%s'.", chat_name)
+                self._press_escape(2)
+                return False
+            LOG.warning("Repetindo com a janela visivel (estava minimizada).")
+            self.bring_to_front()
+            human_pause(0.8, 1.6)
+            if not self._compose(chat_name, text):
+                LOG.error("Nao consegui preencher a mensagem para '%s'.", chat_name)
+                self._press_escape(2)
+                self.set_window_state("minimized")
+                return False
+
         human_pause(1.2, 3.5)
         page.keyboard.press("Enter")
         human_pause(1.0, 2.2)
@@ -603,6 +681,9 @@ class WhatsAppDriver:
                 chat_name,
             )
         self._press_escape(2)
+        if minimizada and self.window_state() != "minimized":
+            # Se tivemos que mostrar a janela para digitar, esconde de novo.
+            self.set_window_state("minimized")
         return confirmed
 
     def _find_chat_row(self, chat_name: str) -> Locator | None:
@@ -674,6 +755,7 @@ class WhatsAppDriver:
             "url": page.url,
             "user_agent": page.evaluate("() => navigator.userAgent"),
             "webdriver_flag": page.evaluate("() => navigator.webdriver"),
+            "window_state": self.window_state(),
             # Se a janela nao couber na tela ou a pagina for maior que a janela, a
             # interface aparece cortada/comprimida - foi o bug do viewport forcado.
             "window": page.evaluate(

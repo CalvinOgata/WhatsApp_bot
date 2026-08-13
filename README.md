@@ -142,7 +142,11 @@ Para o assistente iniciar junto com o Windows:
 
 ## 🛑 Como desligar o programa
 
-Ele roda invisível, então:
+A janela do navegador fica **minimizada** na barra de tarefas — pode clicar nela
+para ver o WhatsApp e minimizar de novo, sem problema. Mas fechar essa janela
+**não** desliga o programa: ele entende que o navegador caiu e abre outro.
+
+Para desligar de verdade:
 
 1. ⌨️ Aperte `Ctrl + Shift + Esc` (Gerenciador de Tarefas).
 2. 🔍 Procure **`pythonw.exe`** na lista.
@@ -166,6 +170,7 @@ aperte `Windows + R`, cole o caminho abaixo e dê *Enter*.
 | 📱 Pediu o QR code de novo | Normal de vez em quando: o WhatsApp desconecta aparelhos antigos. A janela abre sozinha para você escanear. |
 | 🚫 Nada acontece ao clicar em `start.bat` | Rode `setup.bat` novamente e veja se aparece algum erro em vermelho. |
 | 🪟 A janela do WhatsApp aparece cortada ou minúscula | Rode `--diagnose`: a linha `Janela` mostra o tamanho da janela, da página e da tela. Se aparecer um `AVISO` ali, mande essa linha junto com o pedido de ajuda. |
+| 🗕 Cliquei na barra de tarefas e a janela não aparece | Era um defeito das versões antigas (a janela ficava fora do monitor). Atualize e rode `--diagnose`: a linha `Estado` deve dizer `minimized`, e restaurar passa a funcionar. |
 | 👯 Abri duas vezes sem querer | Sem problema: o programa detecta e não abre uma segunda cópia. |
 
 ### 🧰 Comandos extras
@@ -243,6 +248,7 @@ frequência.
     ├── test_config.py       Validação do config.json
     ├── test_scheduler.py    Horários, jitter, dias, não-duplicar
     ├── test_mentions.py     Detecção de @menções
+    ├── test_driver_hidden.py Modo oculto: janela minimizada
     └── test_driver_dom.py   Playwright real contra a página falsa
 ```
 
@@ -250,7 +256,7 @@ frequência.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                  # tudo (116 testes)
+pytest                  # tudo (125 testes)
 pytest -m "not dom"     # só a lógica, sem navegador (rápido)
 ```
 
@@ -273,9 +279,23 @@ alvo aleatório; o `tick()` seguinte que passar desse alvo é o que envia. Assim
 atraso de até 5 minutos não paralisa a detecção de menções.
 
 🕵️ **Nunca headless.** O WhatsApp Web funciona mal sem interface e o fingerprint
-headless é trivial de detectar. Para "rodar em segundo plano", a janela é
-posicionada fora da área visível (em `-32000,-32000`, a mesma posição que o
-Windows usa para janelas minimizadas) — navegador real, janela invisível.
+headless é trivial de detectar. Para "rodar em segundo plano" a janela é
+**minimizada** — navegador real, fora do caminho.
+
+🗕 **Minimizar, não teleportar para fora da tela.** A primeira versão do modo
+oculto colocava a janela em `-32000,-32000`. Ela ficava invisível, mas essa
+também passa a ser a *geometria de restauração*: ao clicar na barra de tarefas ou
+no botão de maximizar, o Windows devolvia a janela para uma posição fora de
+qualquer monitor e nada aparecia. Agora a geometria salva é sempre uma posição
+visível e o esconderijo é `windowState: "minimized"` via CDP, então restaurar,
+maximizar e fechar funcionam como em qualquer janela.
+
+⌨️ **Guard antes do Enter.** `_compose()` confere que o texto realmente entrou na
+caixa de mensagem *antes* de apertar Enter. Se não entrou, nada foi enviado — e aí
+é seguro mostrar a janela e tentar de novo (uma janela minimizada pode não
+processar teclas em algumas versões do Windows). A conferência é antes do envio
+justamente para que a repetição nunca duplique mensagem; depois do Enter, o código
+nunca reenvia.
 
 🪟 **A janela é medida pela tela, nunca fixada.** Passar
 `viewport={"width": 1920, "height": 1080}` parece inofensivo, mas em modo headful

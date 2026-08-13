@@ -196,6 +196,19 @@ def test_conversa_inexistente_nao_envia(driver):
     assert len(enviadas(driver)) == antes
 
 
+def test_nao_envia_se_o_texto_nao_chegou_na_caixa(driver, monkeypatch):
+    """Se a digitacao nao entrou, nao apertamos Enter no vazio.
+
+    Esse e' o cenario que uma janela minimizada poderia causar no Windows: os
+    eventos de teclado nao chegam. Enter sem texto mandaria mensagem vazia ou
+    nada; o guard tem que barrar antes.
+    """
+    antes = len(enviadas(driver))
+    monkeypatch.setattr(driver, "type_human_like", lambda element, text: None)
+    assert driver.send_message("Familia", "Bom dia!") is False
+    assert len(enviadas(driver)) == antes
+
+
 def test_nao_digita_na_conversa_errada(driver):
     """A linha "Ciladas" abre um cabecalho chamado "Outra Conversa"."""
     antes = len(enviadas(driver))
