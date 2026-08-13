@@ -242,6 +242,20 @@ def print_diagnosis(driver: WhatsAppDriver, scheduler: MessageScheduler, config:
     _emit(f"Sessao     : {'conectada' if report['logged_in'] else 'DESCONECTADA (precisa de QR)'}")
     _emit(f"webdriver  : {report['webdriver_flag']} (esperado: False)")
     _emit(f"User-Agent : {report['user_agent']}")
+
+    janela = report["window"]
+    _emit(
+        f"Janela     : {janela['outer'][0]}x{janela['outer'][1]} | "
+        f"pagina {janela['inner'][0]}x{janela['inner'][1]} | "
+        f"tela util {janela['avail'][0]}x{janela['avail'][1]} | zoom {janela['dpr']}"
+    )
+    if (
+        janela["outer"][0] > janela["avail"][0]
+        or janela["outer"][1] > janela["avail"][1]
+    ):
+        _emit("  AVISO: a janela e maior que a tela; parte dela fica fora do monitor.")
+    if janela["inner"][0] > janela["outer"][0]:
+        _emit("  AVISO: a pagina e maior que a janela; a interface aparece comprimida.")
     _emit("")
     _emit("Seletores que casaram (se algum estiver vazio, o WhatsApp mudou o HTML):")
     for nome, selector in report["selectors"].items():

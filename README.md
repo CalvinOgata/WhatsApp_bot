@@ -165,6 +165,7 @@ aperte `Windows + R`, cole o caminho abaixo e dê *Enter*.
 | 📭 A mensagem não foi enviada | O nome da conversa provavelmente está diferente do WhatsApp. Rode o diagnóstico (abaixo): ele diz exatamente qual nome não foi encontrado. |
 | 📱 Pediu o QR code de novo | Normal de vez em quando: o WhatsApp desconecta aparelhos antigos. A janela abre sozinha para você escanear. |
 | 🚫 Nada acontece ao clicar em `start.bat` | Rode `setup.bat` novamente e veja se aparece algum erro em vermelho. |
+| 🪟 A janela do WhatsApp aparece cortada ou minúscula | Rode `--diagnose`: a linha `Janela` mostra o tamanho da janela, da página e da tela. Se aparecer um `AVISO` ali, mande essa linha junto com o pedido de ajuda. |
 | 👯 Abri duas vezes sem querer | Sem problema: o programa detecta e não abre uma segunda cópia. |
 
 ### 🧰 Comandos extras
@@ -249,7 +250,7 @@ frequência.
 
 ```bash
 pip install -r requirements-dev.txt
-pytest                  # tudo (114 testes)
+pytest                  # tudo (116 testes)
 pytest -m "not dom"     # só a lógica, sem navegador (rápido)
 ```
 
@@ -273,8 +274,25 @@ atraso de até 5 minutos não paralisa a detecção de menções.
 
 🕵️ **Nunca headless.** O WhatsApp Web funciona mal sem interface e o fingerprint
 headless é trivial de detectar. Para "rodar em segundo plano", a janela é
-posicionada fora da área visível (`--window-position=-2400,-2400`) — navegador
-real, janela invisível.
+posicionada fora da área visível (em `-32000,-32000`, a mesma posição que o
+Windows usa para janelas minimizadas) — navegador real, janela invisível.
+
+🪟 **A janela é medida pela tela, nunca fixada.** Passar
+`viewport={"width": 1920, "height": 1080}` parece inofensivo, mas em modo headful
+o Playwright honra o viewport **redimensionando a janela** para que a área de
+conteúdo tenha exatamente aquela medida — o que dá uma janela de ~1928x1211. Numa
+tela 1920x1080, ou em qualquer tela com escalonamento do Windows a 125%/150%
+(onde a área útil lógica é bem menor), essa janela não cabe: sobra fora do
+monitor e o Chrome comprime a página no que restou. O sintoma é a interface
+minúscula e embolada, com a caixa de mensagem abaixo da borda da tela.
+
+A correção é `no_viewport=True` (a página passa a usar o tamanho real da janela)
+mais `Browser.setWindowBounds` via CDP, calculado a partir de
+`screen.availWidth/availHeight`. Tamanho e posição **não** vão por
+`--window-size`/`--window-position`: alguns gerenciadores de janela ignoram essas
+flags, e o Chrome ainda restaura por cima delas o tamanho salvo no perfil. Como o
+ajuste roda em todo lançamento (antes de carregar o WhatsApp, senão o layout sai
+torto), ele também conserta perfis que já ficaram com a medida ruim.
 
 🪪 **User-Agent não é sobrescrito** quando usamos Edge/Chrome de verdade: um UA
 inventado que não combina com o navegador é *mais* detectável que o verdadeiro.

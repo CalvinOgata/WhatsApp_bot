@@ -84,9 +84,41 @@ def test_user_agent_nao_denuncia_headless(driver):
     assert "Headless" not in driver.page.evaluate("() => navigator.userAgent")
 
 
-def test_viewport_padrao(driver):
-    largura, altura = driver.page.evaluate("() => [window.innerWidth, window.innerHeight]")
-    assert (largura, altura) == (1920, 1080)
+def _metricas(driver) -> dict:
+    return driver.page.evaluate(
+        """() => ({
+            avail: [screen.availWidth, screen.availHeight],
+            outer: [window.outerWidth, window.outerHeight],
+            inner: [window.innerWidth, window.innerHeight],
+        })"""
+    )
+
+
+def test_janela_cabe_na_tela(driver):
+    """A janela nunca pode passar da area util: no Windows ela sai do monitor."""
+    m = _metricas(driver)
+    assert m["outer"][0] <= m["avail"][0], m
+    assert m["outer"][1] <= m["avail"][1], m
+
+
+def test_pagina_usa_o_tamanho_real_da_janela(driver):
+    """Regressao: `viewport` forcado emulava 1920x1080 dentro de uma janela menor.
+
+    O Chrome comprimia a pagina para caber, e a interface do WhatsApp aparecia
+    minuscula e embolada. Sem emulacao, a diferenca entre janela e pagina e'
+    apenas a moldura do navegador.
+    """
+    m = _metricas(driver)
+    assert m["inner"][0] <= m["outer"][0], m
+    assert m["inner"][1] <= m["outer"][1], m
+    assert m["outer"][0] - m["inner"][0] <= 40, m  # bordas laterais
+    assert m["outer"][1] - m["inner"][1] <= 200, m  # barra de titulo + abas
+
+
+def test_largura_suficiente_para_o_whatsapp(driver):
+    """Estreito demais e o WhatsApp esconde a lista de conversas."""
+    m = _metricas(driver)
+    assert m["inner"][0] >= min(900, m["avail"][0] - 120), m
 
 
 # --------------------------------------------------------------- leitura DOM

@@ -9,6 +9,8 @@ Principios que guiam este modulo:
 * **Nunca headless** - o WhatsApp Web funciona mal em headless e o fingerprint
   headless e' trivial de detectar. Para "rodar em segundo plano" posicionamos a
   janela fora da area visivel da tela.
+* **Janela do tamanho da tela real** - `no_viewport=True` + ajuste por CDP. Ver
+  o comentario em `_fit_window` para o motivo (isso corrige a UI embolada).
 * **Digitacao humana** - `type_human_like` bate tecla por tecla com atraso variavel.
   Nunca usamos `fill()` nem injecao de valor no DOM.
 * **DOM passivo** - a varredura de mencoes e' um unico `evaluate()` por ciclo, sem
@@ -33,6 +35,16 @@ from .config import Config
 LOG = logging.getLogger(__name__)
 
 WHATSAPP_URL = "https://web.whatsapp.com/"
+
+# Dimensao desejada da janela: 1920x1080 e' padrao e nao chama atencao, mas nunca
+# passamos da area util da tela (ver _fit_window). O minimo garante que o WhatsApp
+# Web mostre a lista de conversas junto com a conversa aberta.
+PREFERRED_WINDOW = (1920, 1080)
+MIN_WINDOW = (1024, 700)
+
+# Posicao usada no modo oculto. O proprio Windows coloca janelas minimizadas em
+# (-32000, -32000), entao e' um valor que o sistema trata bem.
+OFFSCREEN_POSITION = (-32000, -32000)
 
 # --------------------------------------------------------------------------
 # Seletores. O WhatsApp Web muda o markup com frequencia, por isso cada alvo
@@ -247,10 +259,13 @@ class WhatsAppDriver:
             return False
 
     def _launch(self, hidden: bool) -> None:
+        # Tamanho e posicao NAO vem por flag: `--window-size`/`--window-position`
+        # sao ignorados por alguns gerenciadores de janela e, pior, o Chrome
+        # restaura o tamanho salvo no perfil por cima deles. Fazemos isso por CDP
+        # em _fit_window, que e' deterministico.
         args = [
             # Exigencia do spec: remove o sinal mais obvio de automacao.
             "--disable-blink-features=AutomationControlled",
-            "--window-size=1920,1080",
             # Mantem a pagina viva mesmo com a janela fora da tela / sem foco.
             "--disable-background-timer-throttling",
             "--disable-backgrounding-occluded-windows",
@@ -258,13 +273,6 @@ class WhatsAppDriver:
             "--no-first-run",
             "--no-default-browser-check",
         ]
-        if hidden:
-            # Chrome/Edge nao tem flag de "iniciar minimizado"; posicionar a janela
-            # fora da area visivel e' a forma padrao de rodar discretamente sem
-            # recorrer a headless (que e' detectavel).
-            args.append("--window-position=-2400,-2400")
-        else:
-            args.append("--window-position=60,40")
 
         self._playwright = sync_playwright().start()
         channel = self.config.browser_channel
@@ -277,7 +285,8 @@ class WhatsAppDriver:
                     args=args,
                     # Playwright injeta --enable-automation por padrao; removemos.
                     ignore_default_args=["--enable-automation"],
-                    viewport={"width": 1920, "height": 1080},
+                    # A pagina usa o tamanho real da janela. Ver _fit_window.
+                    no_viewport=True,
                     locale=self.config.locale,
                     user_agent=None if attempt_channel else _FALLBACK_USER_AGENT,
                 )
@@ -301,7 +310,74 @@ class WhatsAppDriver:
         self._context.add_init_script(_STEALTH_JS)
         self._context.set_default_timeout(20_000)
         self.page = self._context.pages[0] if self._context.pages else self._context.new_page()
+
+        # Ajustar ANTES de carregar o WhatsApp: ele calcula o layout no primeiro
+        # render, e redimensionar depois deixa a interface torta.
+        self._fit_window(hidden=hidden)
         self.page.goto(WHATSAPP_URL, wait_until="domcontentloaded", timeout=90_000)
+
+    def _fit_window(self, hidden: bool) -> None:
+        """Ajusta a janela para caber na tela, via CDP.
+
+        Por que isto existe: antes passavamos `viewport={"width": 1920, "height":
+        1080}`. Em modo headful o Playwright honra o viewport redimensionando a
+        *janela* para que a area de conteudo tenha exatamente essa medida - o que
+        da uma janela de ~1928x1211. Em telas 1920x1080 (ou em qualquer tela com
+        escalonamento do Windows a 125%/150%, onde a area util logica e' bem
+        menor) essa janela nao cabe: sobra fora do monitor, e o Chrome comprime a
+        pagina dentro do que restou. Resultado: interface minuscula e embolada,
+        com a caixa de mensagem abaixo da borda da tela.
+
+        Agora a pagina usa o tamanho real da janela (`no_viewport=True`) e a
+        janela e' dimensionada a partir da area util informada pelo proprio
+        sistema. Como o Chrome guarda o tamanho da janela no perfil, aplicar isso
+        em todo lancamento tambem conserta perfis que ficaram com a medida ruim.
+        """
+        page = self.page
+        if page is None or self._context is None:
+            return
+        try:
+            avail = page.evaluate("() => [screen.availWidth, screen.availHeight]")
+            width = min(int(avail[0] * 0.95), PREFERRED_WINDOW[0])
+            height = min(int(avail[1] * 0.92), PREFERRED_WINDOW[1])
+            # Nao encolher abaixo do utilizavel - desde que a tela permita.
+            width = max(width, min(MIN_WINDOW[0], avail[0]))
+            height = max(height, min(MIN_WINDOW[1], avail[1]))
+
+            if hidden:
+                left, top = OFFSCREEN_POSITION
+            else:
+                left = max(0, (avail[0] - width) // 2)
+                top = max(0, (avail[1] - height) // 2)
+
+            cdp = self._context.new_cdp_session(page)
+            target = cdp.send("Browser.getWindowForTarget")
+            cdp.send(
+                "Browser.setWindowBounds",
+                {
+                    "windowId": target["windowId"],
+                    "bounds": {
+                        "left": left,
+                        "top": top,
+                        "width": width,
+                        "height": height,
+                        "windowState": "normal",
+                    },
+                },
+            )
+            LOG.info(
+                "Janela em %sx%s na posicao (%s,%s); area util da tela: %sx%s.",
+                width,
+                height,
+                left,
+                top,
+                avail[0],
+                avail[1],
+            )
+        except Exception:
+            # Sem isso o programa ainda funciona: a janela fica no tamanho que o
+            # Chrome escolher. Nao vale derrubar a sessao por causa disso.
+            LOG.warning("Nao consegui ajustar o tamanho da janela.", exc_info=True)
 
     def _channel_candidates(self, channel: str) -> list[str | None]:
         """Canal pedido primeiro, depois alternativas, e por fim o Chromium local."""
@@ -598,6 +674,16 @@ class WhatsAppDriver:
             "url": page.url,
             "user_agent": page.evaluate("() => navigator.userAgent"),
             "webdriver_flag": page.evaluate("() => navigator.webdriver"),
+            # Se a janela nao couber na tela ou a pagina for maior que a janela, a
+            # interface aparece cortada/comprimida - foi o bug do viewport forcado.
+            "window": page.evaluate(
+                """() => ({
+                    avail: [screen.availWidth, screen.availHeight],
+                    outer: [window.outerWidth, window.outerHeight],
+                    inner: [window.innerWidth, window.innerHeight],
+                    dpr: window.devicePixelRatio,
+                })"""
+            ),
             "logged_in": selectors["chat_list"] is not None and selectors["qr_code"] is None,
             "selectors": selectors,
             "rows": [],
