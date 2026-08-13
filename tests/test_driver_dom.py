@@ -128,6 +128,27 @@ def test_digitacao_e_tecla_por_tecla(driver):
     driver.page.evaluate("() => { document.getElementById('composer').innerText = ''; }")
 
 
+@pytest.mark.parametrize(
+    "texto",
+    [
+        "Bom dia! ☀️",  # emoji fora do BMP e seletor de variacao
+        "Hora do remédio! 💊",
+        "Bom domingo, família! ❤️",
+        "Reunião às 9h — não esqueça",  # acentos e travessao
+    ],
+)
+def test_digita_acentos_e_emojis(driver, texto):
+    """O README sugere mensagens com emoji: a digitacao precisa dar conta."""
+    caixa = driver.open_chat("Familia")
+    assert caixa is not None
+    driver.type_human_like(caixa, texto)
+    digitado = driver.page.evaluate(
+        "() => document.getElementById('composer').innerText"
+    )
+    assert digitado.strip() == texto
+    driver.page.evaluate("() => { document.getElementById('composer').innerText = ''; }")
+
+
 # -------------------------------------------------------------------- envio
 def test_envia_para_a_conversa_certa(driver):
     antes = len(enviadas(driver))
