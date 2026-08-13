@@ -134,6 +134,28 @@ _SCAN_JS = """
 }
 """
 
+# Le o texto de um campo do WhatsApp do jeito que a pessoa o ve.
+#
+# `inner_text()` nao serve: o WhatsApp troca varios emojis por um <img> (o emoji
+# fica no `alt`/`data-plain-text`), e o texto voltaria sem eles. Como _compose
+# compara o que foi digitado com o que era para ser digitado, um "Bom dia! ☀️"
+# viraria "Bom dia!" e o envio seria cancelado por engano.
+_PLAIN_TEXT_JS = """
+(el) => {
+  const read = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || '';
+    if (node.nodeName === 'IMG') {
+      return node.getAttribute('data-plain-text') || node.getAttribute('alt') || '';
+    }
+    if (node.nodeName === 'BR') return '\\n';
+    let out = '';
+    node.childNodes.forEach((child) => { out += read(child); });
+    return out;
+  };
+  return read(el);
+}
+"""
+
 # Mascara de automacao aplicada antes de qualquer script da pagina rodar.
 _STEALTH_JS = """
 Object.defineProperty(navigator, 'webdriver', { get: () => false });
@@ -526,6 +548,20 @@ class WhatsAppDriver:
             elif index and index % random.randint(12, 20) == 0:
                 time.sleep(random.uniform(0.2, 0.5))
 
+    def _element_text(self, element: Locator, timeout_ms: int = 3000) -> str | None:
+        """Texto de um campo, com os emojis que o WhatsApp renderiza como <img>.
+
+        None quando nem deu para ler (elemento sumiu da pagina) - que e' diferente
+        de "" (o campo esta vazio), e os dois casos levam a decisoes diferentes.
+        O timeout e' curto de proposito: quem chama esta no meio de um envio, e
+        esperar o padrao de 20s por um elemento que ja sumiu so atrasa o resultado.
+        """
+        try:
+            return str(element.evaluate(_PLAIN_TEXT_JS, timeout=timeout_ms) or "")
+        except (PlaywrightError, PlaywrightTimeout):
+            LOG.debug("Nao consegui ler o texto do campo.", exc_info=True)
+            return None
+
     def _clear_field(self) -> None:
         page = self._live_page
         page.keyboard.press("Control+A")
@@ -545,7 +581,7 @@ class WhatsAppDriver:
         if search is None:
             return
         try:
-            if not (search.inner_text() or "").strip():
+            if not (self._element_text(search) or "").strip():
                 return
             search.click()
             human_pause(0.2, 0.5)
@@ -586,6 +622,17 @@ class WhatsAppDriver:
         # Pausa exigida pelo spec antes de clicar no resultado da busca.
         human_pause(1.2, 3.5)
 
+        # Busca vazia depois de digitar = as teclas nao chegaram na pagina. A lista
+        # continua sem filtro, entao ainda pode dar certo se a conversa estiver a
+        # vista; o aviso e' o que separa "nome errado" de "digitacao nao entrou".
+        digitado = self._element_text(search)
+        if digitado is not None and not digitado.strip():
+            LOG.warning(
+                "O nome '%s' nao entrou no campo de busca (a janela pode estar sem foco). "
+                "Vou procurar na lista sem filtro.",
+                chat_name,
+            )
+
         row = self._find_chat_row(chat_name)
         if row is None:
             LOG.error(
@@ -618,29 +665,29 @@ class WhatsAppDriver:
         self._clear_search_text()
         return box
 
-    def _compose(self, chat_name: str, text: str) -> bool:
+    def _compose(self, chat_name: str, text: str) -> Locator | None:
         """Abre a conversa e digita o texto, conferindo que ele chegou na caixa.
 
-        A conferencia acontece ANTES do Enter, entao um "nao chegou" e' sempre
-        seguro de repetir: nada foi enviado ainda.
+        Devolve a propria caixa (usada depois para confirmar o envio), ou None se o
+        texto nao entrou. A conferencia acontece ANTES do Enter, entao um "nao
+        chegou" e' sempre seguro de repetir: nada foi enviado ainda.
         """
         box = self.open_chat(chat_name)
         if box is None:
-            return False
+            return None
         self.type_human_like(box, text)
-        try:
-            digitado = box.inner_text() or ""
-        except PlaywrightError:
-            LOG.warning("Nao consegui ler a caixa de mensagem.", exc_info=True)
-            return False
+        digitado = self._element_text(box)
+        if digitado is None:
+            LOG.warning("Nao consegui ler a caixa de mensagem de '%s'.", chat_name)
+            return None
         if _normalize(digitado) != _normalize(text):
             LOG.warning(
                 "A caixa de mensagem nao recebeu o texto (esperava %r, veio %r).",
                 text,
                 digitado.strip()[:80],
             )
-            return False
-        return True
+            return None
+        return box
 
     def send_message(self, chat_name: str, text: str) -> bool:
         """Procura a conversa, abre, digita e envia. Retorna True se enviou."""
@@ -649,7 +696,8 @@ class WhatsAppDriver:
         LOG.info("Preparando envio para '%s'.", chat_name)
         minimizada = self.window_state() == "minimized"
 
-        if not self._compose(chat_name, text):
+        box = self._compose(chat_name, text)
+        if box is None:
             # Uma janela minimizada pode nao processar a digitacao em algumas
             # versoes do Windows. Como nada foi enviado, mostrar a janela e tentar
             # outra vez e' seguro - e melhor uma janela aparecendo do que um
@@ -661,7 +709,8 @@ class WhatsAppDriver:
             LOG.warning("Repetindo com a janela visivel (estava minimizada).")
             self.bring_to_front()
             human_pause(0.8, 1.6)
-            if not self._compose(chat_name, text):
+            box = self._compose(chat_name, text)
+            if box is None:
                 LOG.error("Nao consegui preencher a mensagem para '%s'.", chat_name)
                 self._press_escape(2)
                 self.set_window_state("minimized")
@@ -671,7 +720,7 @@ class WhatsAppDriver:
         page.keyboard.press("Enter")
         human_pause(1.0, 2.2)
 
-        confirmed = self._last_outgoing_contains(text)
+        confirmed = self._send_confirmed(box, text)
         if confirmed:
             LOG.info("Mensagem enviada para '%s': %s", chat_name, text)
         else:
@@ -722,18 +771,36 @@ class WhatsAppDriver:
         except PlaywrightError:
             return ""
 
+    def _send_confirmed(self, box: Locator, text: str) -> bool:
+        """O Enter saiu mesmo? Duas evidencias independentes.
+
+        A segunda existe porque a primeira depende de seletores de balao, que sao os
+        que mais mudam no WhatsApp Web. Quando eles nao casam, a mensagem era dada
+        como nao enviada e a usuaria recebia um aviso errado mandando conferir os
+        nomes das conversas. A caixa de texto vazia e' um sinal bem mais estavel: o
+        WhatsApp so a limpa depois de enfileirar a mensagem.
+        """
+        if self._last_outgoing_contains(text):
+            return True
+        restante = self._element_text(box)
+        if restante is not None and not restante.strip():
+            LOG.debug("Envio confirmado pela caixa de mensagem vazia.")
+            return True
+        return False
+
     def _last_outgoing_contains(self, text: str) -> bool:
         page = self._live_page
         for selector in ("#main div.message-out", '#main div[data-id*="true_"]'):
             bubbles = page.locator(selector)
             try:
                 count = bubbles.count()
-                if not count:
-                    continue
-                content = bubbles.nth(count - 1).inner_text(timeout=3000)
             except (PlaywrightError, PlaywrightTimeout):
                 continue
-            if _normalize(text) in _normalize(content):
+            if not count:
+                continue
+            # _element_text e nao inner_text: o balao tambem traz emoji como <img>.
+            content = self._element_text(bubbles.nth(count - 1))
+            if content and _normalize(text) in _normalize(content):
                 return True
         return False
 

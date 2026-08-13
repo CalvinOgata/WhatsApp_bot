@@ -209,6 +209,45 @@ def test_nao_envia_se_o_texto_nao_chegou_na_caixa(driver, monkeypatch):
     assert len(enviadas(driver)) == antes
 
 
+def test_le_emoji_renderizado_como_imagem(driver):
+    """O WhatsApp troca varios emojis por <img>; inner_text os perderia.
+
+    Isso importa porque _compose compara o que foi digitado com o que deveria ter
+    sido: com o emoji sumindo da leitura, "Bom dia! ☀️" nunca passaria na conferencia
+    e a mensagem seria cancelada sem motivo.
+    """
+    assert driver.open_chat("Familia") is not None
+    driver.page.evaluate(
+        """() => {
+            document.getElementById('composer').innerHTML =
+              'Bom dia! <img alt="\\u2600\\ufe0f" data-plain-text="\\u2600\\ufe0f">';
+        }"""
+    )
+    caixa = driver.page.locator("#composer")
+    assert driver._element_text(caixa) == "Bom dia! ☀️"
+    assert "☀️" not in caixa.inner_text(), "o teste so vale se inner_text falhar mesmo"
+    driver.page.evaluate("() => { document.getElementById('composer').innerHTML = ''; }")
+
+
+def test_envio_confirmado_pela_caixa_vazia(driver, monkeypatch):
+    """Quando o seletor de balao nao casa, a caixa vazia ainda prova que saiu."""
+    assert driver.open_chat("Familia") is not None
+    monkeypatch.setattr(driver, "_last_outgoing_contains", lambda text: False)
+    driver.page.evaluate("() => { document.getElementById('composer').innerText = ''; }")
+    assert driver._send_confirmed(driver.page.locator("#composer"), "Bom dia!") is True
+
+
+def test_envio_nao_confirmado_com_o_texto_parado_na_caixa(driver, monkeypatch):
+    """Enter que nao funcionou deixa o texto onde estava: nao pode virar sucesso."""
+    assert driver.open_chat("Familia") is not None
+    monkeypatch.setattr(driver, "_last_outgoing_contains", lambda text: False)
+    driver.page.evaluate(
+        "() => { document.getElementById('composer').innerText = 'Bom dia!'; }"
+    )
+    assert driver._send_confirmed(driver.page.locator("#composer"), "Bom dia!") is False
+    driver.page.evaluate("() => { document.getElementById('composer').innerText = ''; }")
+
+
 def test_nao_digita_na_conversa_errada(driver):
     """A linha "Ciladas" abre um cabecalho chamado "Outra Conversa"."""
     antes = len(enviadas(driver))

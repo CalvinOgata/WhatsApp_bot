@@ -6,9 +6,13 @@ pode: ele so cria um arquivo, e todo o comportamento esta neste modulo.
 
 from __future__ import annotations
 
+import logging
+from logging.handlers import RotatingFileHandler
+
 import pytest
 
 import main as mainmod
+from src.scheduler import MessageScheduler
 
 
 @pytest.fixture(autouse=True)
@@ -19,6 +23,19 @@ def estado_limpo():
     yield
     mainmod._stop_requested = False
     mainmod._stop_file = None
+
+
+class NotifierFalso:
+    """Guarda os avisos em vez de chamar o Windows."""
+
+    def __init__(self) -> None:
+        self.avisos: list[tuple[str, str]] = []
+
+    def notify(self, title: str, body: str) -> None:
+        self.avisos.append((title, body))
+
+    def notify_mention(self, chat: str, preview: str) -> None:
+        self.avisos.append((chat, preview))
 
 
 # ------------------------------------------------------------ pedido de parada
@@ -148,3 +165,118 @@ def test_send_now_aceita_nome_com_espaco():
 def test_argumento_desconhecido_e_recusado():
     with pytest.raises(SystemExit):
         mainmod.parse_args(["--modo-turbo"])
+
+
+# --------------------------------------------------------- pedido de envio
+# Cenario que motivou tudo isto: o assistente esta ligado (avisando das mencoes) e
+# a pessoa roda `--send-now "bom dia"` no Prompt. O segundo processo nao pode abrir
+# o mesmo perfil do navegador, entao ele deixa o pedido em um arquivo.
+def test_pedido_de_envio_e_consumido(tmp_path):
+    pedido = tmp_path / "send.request"
+    mainmod.write_send_request(pedido, "bom dia")
+    assert mainmod.take_send_request(pedido) == "bom dia"
+    assert not pedido.exists()
+    assert mainmod.take_send_request(pedido) is None
+
+
+def test_pedido_de_envio_vazio_e_descartado(tmp_path):
+    """Um arquivo ilegivel nao pode ficar no disco: seria relido a cada ciclo."""
+    pedido = tmp_path / "send.request"
+    pedido.write_text("   \n", encoding="utf-8")
+    assert mainmod.take_send_request(pedido) is None
+    assert not pedido.exists()
+
+
+def test_send_request_fica_no_data_dir(make_config):
+    config = make_config()
+    assert config.send_request_path.parent == config.data_dir
+    assert config.send_request_path.name == "send.request"
+
+
+def _scheduler_espiao(config):
+    """Agendador de verdade, com o envio trocado por um registrador."""
+    enviadas: list[str] = []
+
+    def envia(message) -> int:
+        enviadas.append(message.name)
+        return len(message.chats)
+
+    return MessageScheduler(config, envia), enviadas
+
+
+def test_loop_atende_o_pedido_de_envio(make_config):
+    config = make_config()
+    scheduler, enviadas = _scheduler_espiao(config)
+    mainmod.write_send_request(config.send_request_path, "bom dia")
+
+    mainmod.serve_send_request(scheduler, config, NotifierFalso())
+
+    assert enviadas == ["bom dia"]
+    assert not config.send_request_path.exists()
+
+
+def test_loop_sem_pedido_nao_envia_nada(make_config):
+    config = make_config()
+    scheduler, enviadas = _scheduler_espiao(config)
+    mainmod.serve_send_request(scheduler, config, NotifierFalso())
+    assert enviadas == []
+
+
+def test_pedido_com_nome_errado_avisa_e_nao_derruba_o_loop(make_config):
+    config = make_config()
+    scheduler, enviadas = _scheduler_espiao(config)
+    notifier = NotifierFalso()
+    mainmod.write_send_request(config.send_request_path, "cafe da tarde")
+
+    mainmod.serve_send_request(scheduler, config, notifier)
+
+    assert enviadas == []
+    assert not config.send_request_path.exists()
+    assert notifier.avisos, "o usuario precisa saber que o nome nao existe"
+
+
+def test_send_now_com_assistente_ligado_vira_pedido(make_config):
+    config = make_config()
+    args = mainmod.parse_args(["--send-now", "bom dia"])
+    assert mainmod.delegate_to_running_instance(config, NotifierFalso(), args, 4321) == 0
+    assert config.send_request_path.read_text(encoding="utf-8") == "bom dia"
+
+
+def test_diagnose_com_assistente_ligado_nao_vira_pedido(make_config):
+    """--diagnose precisa do navegador so para ele: nao da para delegar."""
+    config = make_config()
+    args = mainmod.parse_args(["--diagnose"])
+    assert mainmod.delegate_to_running_instance(config, NotifierFalso(), args, 4321) == 3
+    assert not config.send_request_path.exists()
+
+
+# ------------------------------------------------------------------- log
+@pytest.fixture
+def root_limpo():
+    """Isola o logger raiz: setup_logging mexe em estado global."""
+    root = logging.getLogger()
+    antes, nivel = root.handlers[:], root.level
+    root.handlers[:] = []
+    yield root
+    for handler in root.handlers:
+        handler.close()
+    root.handlers[:] = antes
+    root.setLevel(nivel)
+
+
+def test_instancia_secundaria_nao_abre_o_log_compartilhado(root_limpo, monkeypatch, tmp_path):
+    """Dois RotatingFileHandler no mesmo arquivo embaralham o log no Windows.
+
+    Era o que acontecia ao rodar `--send-now` com o assistente ligado: as linhas se
+    misturavam e a rotacao falhava, porque o outro processo ainda segurava o arquivo.
+    """
+    monkeypatch.setattr(mainmod, "default_data_dir", lambda: tmp_path)
+    assert mainmod.setup_logging(False, to_file=False) is None
+    assert not [h for h in root_limpo.handlers if isinstance(h, RotatingFileHandler)]
+    assert not (tmp_path / "assistente.log").exists()
+
+
+def test_instancia_dona_escreve_no_log(root_limpo, monkeypatch, tmp_path):
+    monkeypatch.setattr(mainmod, "default_data_dir", lambda: tmp_path)
+    assert mainmod.setup_logging(False, to_file=True) == tmp_path / "assistente.log"
+    assert len([h for h in root_limpo.handlers if isinstance(h, RotatingFileHandler)]) == 1

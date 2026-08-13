@@ -161,6 +161,15 @@ class Config:
         return self.data_dir / "stop.request"
 
     @property
+    def send_request_path(self) -> Path:
+        """Arquivo que o `--send-now` cria quando o assistente ja esta rodando.
+
+        Um segundo processo nao pode abrir o mesmo perfil do navegador, entao ele
+        deixa aqui o nome da mensagem e quem executa e' a instancia que ja esta de pe.
+        """
+        return self.data_dir / "send.request"
+
+    @property
     def all_chats(self) -> tuple[str, ...]:
         """Toda conversa citada em qualquer lugar da configuracao."""
         seen: list[str] = list(self.target_chats)

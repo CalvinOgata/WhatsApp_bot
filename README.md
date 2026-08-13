@@ -183,6 +183,7 @@ aperte `Windows + R`, cole o caminho abaixo e dê *Enter*.
 | --- | --- |
 | 🔕 Não recebi o aviso de menção | Confira se `user_name` é o nome que aparece no `@`. Teste as notificações: veja "Comandos extras" abaixo. |
 | 📭 A mensagem não foi enviada | O nome da conversa provavelmente está diferente do WhatsApp. Rode o diagnóstico (abaixo): ele diz exatamente qual nome não foi encontrado. |
+| 🧪 Testei com `--send-now` e não saiu nada | Confira o `assistente.log`: com o assistente ligado, quem envia é ele, e o resultado vai só para o log (veja "Comandos extras"). |
 | 📱 Pediu o QR code de novo | Normal de vez em quando: o WhatsApp desconecta aparelhos antigos. A janela abre sozinha para você escanear. |
 | 🚫 Nada acontece ao clicar em `start.bat` | Rode `setup.bat` novamente e veja se aparece algum erro em vermelho. |
 | 🪟 A janela do WhatsApp aparece cortada ou minúscula | Rode `--diagnose`: a linha `Janela` mostra o tamanho da janela, da página e da tela. Se aparecer um `AVISO` ali, mande essa linha junto com o pedido de ajuda. |
@@ -215,9 +216,30 @@ envia nada e responde:
   `src/whatsapp_driver.py`;
 - 👀 o que o programa está enxergando na lista de conversas agora.
 
+🛑 O `--diagnose` precisa do navegador só para ele: **desligue o assistente com
+`stop.bat` antes**, rode o comando e depois ligue de novo com `start.bat`. Se
+esquecer, ele avisa em vez de fazer besteira — dois programas no mesmo perfil do
+navegador estragariam a sessão do WhatsApp.
+
 📤 **`--send-now "bom dia"`** envia aquela mensagem na hora, útil para confirmar
 os nomes das conversas. O nome é o campo `name` do `config.json`; se você errar,
-o programa lista os nomes disponíveis.
+o programa lista os nomes disponíveis. Ao terminar ele diz na tela para quantas
+conversas a mensagem foi:
+
+```
+Mensagem "bom dia" enviada para 2 conversa(s).
+```
+
+▶️ Esse comando funciona **com o assistente ligado**. Nesse caso ele não abre um
+segundo navegador: passa o pedido para o programa que já está rodando, que envia
+em poucos segundos. A tela mostra:
+
+```
+O assistente ja esta rodando (processo 1234); passei o pedido para ele.
+"bom dia" sai em ate 12 segundos. O resultado fica no log: ...
+```
+
+O resultado desse envio aparece no `assistente.log`, não no Prompt de Comando.
 
 ---
 
