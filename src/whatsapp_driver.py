@@ -337,16 +337,26 @@ class WhatsAppDriver:
             LOG.debug("Nao foi possivel focar a janela.", exc_info=True)
 
     # ------------------------------------------------------------------ estado
-    def _first_visible(self, selectors: Sequence[str], timeout_ms: int = 4000) -> Locator | None:
+    def _match_selector(
+        self, selectors: Sequence[str], timeout_ms: int = 4000
+    ) -> tuple[str | None, Locator | None]:
+        """Primeiro seletor visivel da lista, junto com o proprio seletor.
+
+        Saber *qual* candidato funcionou e' o que o modo --diagnose precisa quando
+        o WhatsApp muda o HTML.
+        """
         page = self._live_page
         for selector in selectors:
             locator = page.locator(selector).first
             try:
                 locator.wait_for(state="visible", timeout=timeout_ms)
-                return locator
+                return selector, locator
             except (PlaywrightTimeout, PlaywrightError):
                 continue
-        return None
+        return None, None
+
+    def _first_visible(self, selectors: Sequence[str], timeout_ms: int = 4000) -> Locator | None:
+        return self._match_selector(selectors, timeout_ms)[1]
 
     def _wait_for_chat_list(self, timeout_ms: int) -> bool:
         """Espera a lista de conversas, checando QR code em paralelo."""
@@ -408,6 +418,26 @@ class WhatsAppDriver:
         page.keyboard.press("Backspace")
         time.sleep(random.uniform(0.2, 0.5))
 
+    def _clear_search_text(self) -> None:
+        """Esvazia a busca para que a lista de conversas volte a mostrar tudo.
+
+        Importante para a deteccao de mencoes: com um filtro esquecido no campo de
+        busca, `scan_chat_list` leria apenas as linhas que casam com aquele texto e
+        as mencoes das outras conversas passariam batido. O Escape normalmente
+        limpa, mas nao dependemos disso.
+        """
+        search = self._first_visible(SEARCH_SELECTORS, timeout_ms=3000)
+        if search is None:
+            return
+        try:
+            if not (search.inner_text() or "").strip():
+                return
+            search.click()
+            human_pause(0.2, 0.5)
+            self._clear_field()
+        except PlaywrightError:
+            LOG.debug("Nao consegui limpar o campo de busca.", exc_info=True)
+
     def _press_escape(self, times: int = 1) -> None:
         """Fecha busca/conversa aberta. E' sempre limpeza, entao falha em silencio."""
         try:
@@ -419,16 +449,14 @@ class WhatsAppDriver:
             LOG.debug("Escape ignorado: pagina indisponivel.", exc_info=True)
 
     # ----------------------------------------------------------------- envio
-    def send_message(self, chat_name: str, text: str) -> bool:
-        """Procura a conversa, abre, digita e envia. Retorna True se enviou.
+    def open_chat(self, chat_name: str) -> Locator | None:
+        """Busca a conversa e abre. Devolve a caixa de mensagem, ou None se falhou.
 
-        A mensagem so e' digitada depois de confirmar, pelo titulo no cabecalho,
-        que a conversa aberta e' exatamente a pedida - mandar "Bom dia!" para a
-        conversa errada e' pior do que nao mandar.
+        So devolve a caixa depois de confirmar, pelo titulo no cabecalho, que a
+        conversa aberta e' exatamente a pedida - mandar "Bom dia!" para a conversa
+        errada e' pior do que nao mandar. Nao digita nada: o modo --diagnose usa
+        este metodo para checar os nomes sem enviar mensagem.
         """
-        page = self._live_page
-
-        LOG.info("Preparando envio para '%s'.", chat_name)
         self._press_escape(2)
 
         search = self._first_visible(SEARCH_SELECTORS, timeout_ms=8000)
@@ -451,7 +479,7 @@ class WhatsAppDriver:
                 chat_name,
             )
             self._press_escape(2)
-            return False
+            return None
 
         row.click()
         human_pause(0.8, 2.0)
@@ -460,14 +488,28 @@ class WhatsAppDriver:
         if box is None:
             LOG.error("Caixa de mensagem nao apareceu para '%s'.", chat_name)
             self._press_escape(2)
-            return False
+            return None
 
         opened = self._opened_chat_title()
         if _normalize(opened) != _normalize(chat_name):
             LOG.error(
-                "Abortando envio: a conversa aberta e' '%s', esperava '%s'.", opened, chat_name
+                "Conversa aberta e' '%s', esperava '%s'. Nada sera digitado.", opened, chat_name
             )
             self._press_escape(2)
+            return None
+
+        # A conversa certa esta aberta: tira o filtro da busca para nao cegar a
+        # varredura de mencoes depois. Nao fecha a conversa.
+        self._clear_search_text()
+        return box
+
+    def send_message(self, chat_name: str, text: str) -> bool:
+        """Procura a conversa, abre, digita e envia. Retorna True se enviou."""
+        page = self._live_page
+
+        LOG.info("Preparando envio para '%s'.", chat_name)
+        box = self.open_chat(chat_name)
+        if box is None:
             return False
 
         self.type_human_like(box, text)
@@ -537,6 +579,46 @@ class WhatsAppDriver:
             if _normalize(text) in _normalize(content):
                 return True
         return False
+
+    # ----------------------------------------------------------- diagnostico
+    def diagnose(self, chats: Sequence[str]) -> dict:
+        """Relatorio do estado da pagina, sem enviar nada.
+
+        Responde as tres perguntas que aparecem quando o programa "para de
+        funcionar": a sessao esta de pe? qual seletor casou com cada elemento
+        (ou seja, o WhatsApp mudou o HTML)? cada conversa do config.json existe?
+        """
+        page = self._live_page
+        selectors: dict[str, str | None] = {"message_box": None}
+        selectors["chat_list"], _ = self._match_selector(CHAT_LIST_SELECTORS, 3000)
+        selectors["qr_code"], _ = self._match_selector(QR_SELECTORS, 800)
+        selectors["search"], _ = self._match_selector(SEARCH_SELECTORS, 3000)
+
+        report: dict = {
+            "url": page.url,
+            "user_agent": page.evaluate("() => navigator.userAgent"),
+            "webdriver_flag": page.evaluate("() => navigator.webdriver"),
+            "logged_in": selectors["chat_list"] is not None and selectors["qr_code"] is None,
+            "selectors": selectors,
+            "rows": [],
+            "chats": {},
+        }
+
+        # A lista precisa estar sem filtro para o relatorio refletir a realidade.
+        self._clear_search_text()
+        try:
+            report["rows"] = self.scan_chat_list()
+        except DriverError as exc:
+            report["scan_error"] = str(exc)
+
+        for chat in chats:
+            box = self.open_chat(chat)
+            report["chats"][chat] = box is not None
+            if box is not None and selectors["message_box"] is None:
+                selectors["message_box"], _ = self._match_selector(MESSAGE_BOX_SELECTORS, 5000)
+            self._press_escape(2)
+            human_pause(0.5, 1.5)
+        return report
 
     # -------------------------------------------------------------- mencoes
     def scan_chat_list(self) -> list[dict]:

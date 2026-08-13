@@ -1,0 +1,5 @@
+# Dependencias apenas para rodar os testes. O usuario final nao precisa disto:
+# o setup.bat instala somente o requirements.txt.
+-r requirements.txt
+
+pytest>=8,<9

@@ -1,0 +1,105 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WhatsApp</title>
+<style>
+  body { font: 14px sans-serif; margin: 0; display: flex; }
+  #pane-side { width: 380px; border-right: 1px solid #ccc; height: 100vh; overflow: auto; }
+  [role="listitem"] { padding: 8px; border-bottom: 1px solid #eee; cursor: pointer; }
+  #search { border: 1px solid #999; padding: 6px; margin: 6px; min-height: 20px; }
+  #main { flex: 1; display: none; flex-direction: column; height: 100vh; }
+  header { padding: 10px; border-bottom: 1px solid #ccc; }
+  #msgs { flex: 1; overflow: auto; padding: 8px; }
+  footer { border-top: 1px solid #ccc; padding: 8px; }
+  #composer { border: 1px solid #999; padding: 6px; min-height: 20px; }
+  .message-out { text-align: right; background: #dcf8c6; margin: 4px; padding: 4px; }
+</style>
+
+<div id="pane-side">
+  <div id="search" contenteditable="true" data-tab="3" aria-label="Pesquisar"></div>
+  <div id="rows"></div>
+</div>
+
+<div id="main">
+  <header><span id="chat-title" title=""></span></header>
+  <div id="msgs"></div>
+  <footer>
+    <div id="composer" contenteditable="true" data-tab="10" aria-label="Digite uma mensagem"></div>
+  </footer>
+</div>
+
+<script>
+  // Cada linha imita a estrutura relevante do WhatsApp Web: span[title] com o nome,
+  // badge de nao lidas com aria-label e, quando houver, o icone de mencao.
+  // "Ciladas" abre um cabecalho com OUTRO nome, para testar a trava de seguranca.
+  const CHATS = [
+    { title: "Familia", preview: "Joao: @Maria bom dia!", unread: 2, mention: true, opens: "Familia" },
+    { title: "Amigas", preview: "Ana: alguem viu o filme?", unread: 1, mention: false, opens: "Amigas" },
+    { title: "Trabalho", preview: "Você: @Joao me liga", unread: 0, mention: true, opens: "Trabalho" },
+    { title: "Ciladas", preview: "Bia: oi", unread: 1, mention: false, opens: "Outra Conversa" },
+  ];
+
+  const rowsEl = document.getElementById("rows");
+
+  function render(filter) {
+    rowsEl.innerHTML = "";
+    const needle = (filter || "").trim().toLowerCase();
+    CHATS.filter((c) => !needle || c.title.toLowerCase().includes(needle)).forEach((chat) => {
+      const row = document.createElement("div");
+      row.setAttribute("role", "listitem");
+      const name = document.createElement("span");
+      name.setAttribute("title", chat.title);
+      name.textContent = chat.title;
+      row.appendChild(name);
+      row.appendChild(document.createTextNode(" 10:32 "));
+      const prev = document.createElement("span");
+      prev.textContent = chat.preview;
+      row.appendChild(prev);
+      if (chat.mention) {
+        const icon = document.createElement("span");
+        icon.setAttribute("data-icon", "mention");
+        icon.textContent = " @ ";
+        row.appendChild(icon);
+      }
+      if (chat.unread) {
+        const badge = document.createElement("span");
+        badge.setAttribute("aria-label", chat.unread + " mensagens não lidas");
+        badge.textContent = " " + chat.unread;
+        row.appendChild(badge);
+      }
+      row.addEventListener("click", () => openChat(chat.opens));
+      rowsEl.appendChild(row);
+    });
+  }
+
+  function openChat(title) {
+    document.getElementById("chat-title").setAttribute("title", title);
+    document.getElementById("chat-title").textContent = title;
+    document.getElementById("msgs").innerHTML = "";
+    document.getElementById("main").style.display = "flex";
+  }
+
+  document.getElementById("search").addEventListener("input", (e) => {
+    render(e.target.innerText);
+  });
+
+  const composer = document.getElementById("composer");
+  composer.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.shiftKey) return;
+    e.preventDefault();
+    const text = composer.innerText.trim();
+    if (!text) return;
+    const bubble = document.createElement("div");
+    bubble.className = "message-out";
+    const span = document.createElement("span");
+    span.className = "selectable-text";
+    span.textContent = text;
+    bubble.appendChild(span);
+    document.getElementById("msgs").appendChild(bubble);
+    composer.innerText = "";
+    window.__sent = (window.__sent || []).concat([
+      { chat: document.getElementById("chat-title").getAttribute("title"), text: text },
+    ]);
+  });
+
+  render("");
+</script>

@@ -3,7 +3,7 @@
 
 Roda um unico processo, um unico thread:
 
-    loop principal -> agendador (bom dia / boa noite)
+    loop principal -> agendador (mensagens do config.json)
                    -> varredura de mencoes (@Nome) -> notificacao do Windows
 
 Tudo em espaco de usuario: nenhuma etapa pede permissao de Administrador.
@@ -23,9 +23,9 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from types import FrameType
 
-from src.config import Config, ConfigError, default_data_dir, load_config
+from src.config import Config, ConfigError, ScheduledMessage, default_data_dir, load_config
 from src.notifier import Notifier
-from src.scheduler import EVENING, MORNING, GreetingScheduler
+from src.scheduler import MessageScheduler
 from src.whatsapp_driver import DriverError, LoggedOutError, WhatsAppDriver
 
 APP_NAME = "Assistente do WhatsApp"
@@ -34,8 +34,8 @@ LOG = logging.getLogger("assistente")
 # Espera entre tentativas quando o navegador cai (segundos).
 RESTART_BACKOFF = (15, 30, 60, 120, 300)
 
-# Pausa entre conversas ao enviar a mesma saudacao: uma pessoa nao dispara
-# mensagens para varios grupos no mesmo segundo.
+# Pausa entre conversas ao enviar a mesma mensagem: uma pessoa nao dispara
+# textos para varios grupos no mesmo segundo.
 BETWEEN_CHATS_SECONDS = (8.0, 25.0)
 
 _stop_requested = False
@@ -82,6 +82,14 @@ def setup_logging(verbose: bool) -> Path:
 
     logging.getLogger("schedule").setLevel(logging.WARNING)
     return log_path
+
+
+def _emit(text: str = "") -> None:
+    """Mostra no console quando ha um (modos --diagnose e afins) e sempre no log."""
+    if sys.stdout is not None:
+        print(text)
+    if text:
+        LOG.info(text)
 
 
 def _process_alive(pid: int) -> bool:
@@ -167,23 +175,23 @@ def interruptible_sleep(seconds: float) -> None:
 
 # ----------------------------------------------------------------- aplicacao
 def make_send_callback(driver: WhatsAppDriver, notifier: Notifier, config: Config):
-    """Fabrica o callback que o agendador usa para enviar uma saudacao."""
+    """Fabrica o callback que o agendador usa para enviar uma mensagem."""
 
-    def send(job_key: str, message: str) -> int:
+    def send(message: ScheduledMessage) -> int:
         enviados = 0
-        for index, chat in enumerate(config.target_chats):
+        for index, chat in enumerate(message.chats):
             if _stop_requested:
-                LOG.warning("Encerrando no meio da saudacao '%s'.", job_key)
+                LOG.warning("Encerrando no meio da mensagem '%s'.", message.name)
                 break
             if index:
                 interruptible_sleep(random.uniform(*BETWEEN_CHATS_SECONDS))
-            if driver.send_message(chat, message):
+            if driver.send_message(chat, message.message):
                 enviados += 1
-        faltando = len(config.target_chats) - enviados
+        faltando = len(message.chats) - enviados
         if faltando:
             notifier.notify(
                 APP_NAME,
-                f"Nao consegui enviar \"{message}\" para {faltando} conversa(s). "
+                f'Nao consegui enviar "{message.message}" para {faltando} conversa(s). '
                 "Confira os nomes no config.json.",
             )
         return enviados
@@ -192,9 +200,13 @@ def make_send_callback(driver: WhatsAppDriver, notifier: Notifier, config: Confi
 
 
 def main_loop(
-    driver: WhatsAppDriver, scheduler: GreetingScheduler, config: Config, notifier: Notifier
+    driver: WhatsAppDriver, scheduler: MessageScheduler, config: Config, notifier: Notifier
 ) -> None:
-    LOG.info("Monitorando mencoes a %s a cada %ss.", config.mention_names, config.check_interval_seconds)
+    LOG.info(
+        "Monitorando mencoes a %s a cada %ss.",
+        ", ".join(config.mention_names),
+        config.check_interval_seconds,
+    )
     while not _stop_requested:
         scheduler.tick()
         try:
@@ -208,10 +220,63 @@ def main_loop(
         interruptible_sleep(config.check_interval_seconds)
 
 
-def run(config: Config, notifier: Notifier, test_job: str | None) -> int:
+def print_diagnosis(driver: WhatsAppDriver, scheduler: MessageScheduler, config: Config) -> None:
+    """Relatorio para descobrir *por que* algo parou de funcionar."""
+    _emit(f"=== Diagnostico: {APP_NAME} ===")
+    _emit(f"Log        : {config.log_path}")
+    _emit(f"Dados      : {config.data_dir}")
+    _emit(f"Navegador  : canal '{config.browser_channel}'")
+    _emit(f"Mencoes    : {', '.join(config.mention_names)}")
+    _emit(f"Intervalo  : {config.check_interval_seconds}s")
+    _emit("")
+    _emit("Agenda configurada:")
+    for message in config.messages:
+        quando = scheduler.next_run(message.key)
+        proximo = quando.strftime("%d/%m %H:%M") if quando else "?"
+        marca = " (ja enviada hoje)" if scheduler.sent_today(message.key) else ""
+        _emit(f"  {message.name}: {message.describe()} | proximo: {proximo}{marca}")
+    _emit("")
+
+    report = driver.diagnose(config.all_chats)
+    _emit(f"Pagina     : {report['url']}")
+    _emit(f"Sessao     : {'conectada' if report['logged_in'] else 'DESCONECTADA (precisa de QR)'}")
+    _emit(f"webdriver  : {report['webdriver_flag']} (esperado: False)")
+    _emit(f"User-Agent : {report['user_agent']}")
+    _emit("")
+    _emit("Seletores que casaram (se algum estiver vazio, o WhatsApp mudou o HTML):")
+    for nome, selector in report["selectors"].items():
+        _emit(f"  {nome:<12}: {selector or '(nenhum)'}")
+    if report.get("scan_error"):
+        _emit(f"  ERRO na leitura da lista: {report['scan_error']}")
+    _emit("")
+
+    _emit("Conversas do config.json:")
+    for chat, encontrada in report["chats"].items():
+        _emit(f"  {'OK   ' if encontrada else 'FALHA'} {chat}")
+    if not all(report["chats"].values()):
+        _emit("  -> Um nome com FALHA nao existe na busca do WhatsApp.")
+        _emit("     Copie o nome exatamente como aparece na lista de conversas.")
+    _emit("")
+
+    rows = report["rows"]
+    _emit(f"Lista de conversas vista agora ({len(rows)} linhas, mostrando ate 15):")
+    for row in rows[:15]:
+        marcas = "".join(
+            (
+                "[nao lida]" if row.get("unread") else "",
+                "[mencao]" if row.get("mention") else "",
+            )
+        )
+        _emit(f"  {marcas or '[lida]'} {row.get('title')} | {row.get('text', '')[:70]}")
+    _emit("")
+    _emit("Fim do diagnostico. Nenhuma mensagem foi enviada.")
+
+
+def run(config: Config, notifier: Notifier, args: argparse.Namespace) -> int:
     driver = WhatsAppDriver(config)
-    scheduler = GreetingScheduler(config, make_send_callback(driver, notifier, config))
-    LOG.info("Agenda: %s", scheduler.describe())
+    scheduler = MessageScheduler(config, make_send_callback(driver, notifier, config))
+    for linha in scheduler.describe():
+        LOG.info("Agenda: %s", linha)
 
     attempt = 0
     try:
@@ -219,8 +284,11 @@ def run(config: Config, notifier: Notifier, test_job: str | None) -> int:
             try:
                 driver.start()
                 attempt = 0
-                if test_job:
-                    scheduler.trigger_now(test_job)
+                if args.diagnose:
+                    print_diagnosis(driver, scheduler, config)
+                    return 0
+                if args.send_now:
+                    scheduler.trigger_now(args.send_now)
                     return 0
                 main_loop(driver, scheduler, config, notifier)
                 return 0
@@ -254,7 +322,7 @@ def run(config: Config, notifier: Notifier, test_job: str | None) -> int:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="Assistente do WhatsApp",
-        description="Envia bom dia / boa noite e avisa quando você e' mencionada.",
+        description="Envia mensagens nos horarios configurados e avisa quando você e' mencionada.",
     )
     parser.add_argument(
         "--visible", action="store_true", help="mantem a janela do navegador visivel"
@@ -269,8 +337,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--send-now",
-        choices=(MORNING, EVENING),
-        help="envia a saudacao agora, para testar os nomes das conversas",
+        metavar="NOME",
+        help='envia agora a mensagem com esse nome (ex.: --send-now "bom dia")',
+    )
+    parser.add_argument(
+        "--diagnose",
+        action="store_true",
+        help="checa sessao, seletores e nomes das conversas sem enviar nada",
     )
     return parser.parse_args(argv)
 
@@ -290,21 +363,30 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config()
     except ConfigError as exc:
         LOG.error("Configuracao invalida: %s", exc)
+        _emit(f"Configuracao invalida: {exc}")
         notifier.notify(APP_NAME, str(exc))
         return 2
 
-    if args.visible:
+    # Validar o nome ANTES de abrir o navegador: erro de digitacao nao merece
+    # esperar a sessao subir para so entao reclamar.
+    if args.send_now and config.find_message(args.send_now) is None:
+        disponiveis = ", ".join(f'"{m.name}"' for m in config.messages)
+        _emit(f'Nao existe mensagem "{args.send_now}". Disponiveis: {disponiveis}')
+        return 2
+
+    if args.visible or args.diagnose:
         config.hide_window = False
 
     lock = SingleInstanceLock(config.lock_path)
     if not lock.acquire():
+        _emit("O assistente ja esta rodando. Feche a copia anterior antes de abrir outra.")
         notifier.notify(
             APP_NAME, "O assistente ja esta rodando. Nao e' preciso abrir de novo."
         )
         return 3
 
     try:
-        return run(config, notifier, args.send_now)
+        return run(config, notifier, args)
     finally:
         lock.release()
 
